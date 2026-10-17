@@ -35,13 +35,14 @@ DEFECT_TEXT = {
     'Free particle': 'Free conducting particle moving inside the enclosure',
 }
 
-ASSET_CLASSES = ['GIS', 'Transformer', 'Reactor', 'Cable']
+ASSET_CLASSES = ['GIS', 'Transformer', 'Reactor', 'Cable', 'Motor']
 # FMEA severity of each defect at each asset class (1-10).
 SEVERITY = {
     'GIS':         {'No PD': 1, 'External noise': 1, 'Corona': 6, 'Floating': 9, 'Void': 9, 'Surface': 8, 'Free particle': 10},
     'Transformer': {'No PD': 1, 'External noise': 1, 'Corona': 5, 'Floating': 8, 'Void': 9, 'Surface': 8, 'Free particle': 7},
     'Reactor':     {'No PD': 1, 'External noise': 1, 'Corona': 5, 'Floating': 8, 'Void': 9, 'Surface': 8, 'Free particle': 7},
     'Cable':       {'No PD': 1, 'External noise': 1, 'Corona': 5, 'Floating': 7, 'Void': 9, 'Surface': 8, 'Free particle': 6},
+    'Motor':       {'No PD': 1, 'External noise': 1, 'Corona': 5, 'Floating': 6, 'Void': 7, 'Surface': 8, 'Free particle': 4},
 }
 
 # magnitude above the sensor baseline (dB)
@@ -80,6 +81,8 @@ def asset_class(asset_type):
         return 'Reactor'
     if 'cable' in t:
         return 'Cable'
+    if 'motor' in t:
+        return 'Motor'
     return 'Transformer'
 
 
@@ -327,15 +330,6 @@ def assess(online, sensors, model, dga=None, acoustic=None, sf6=None):
     df.loc[ext & ~no_pd, 'Defect'] = 'External noise'
     df.loc[df['Noise Reference'], 'Defect'] = np.where(no_pd[df['Noise Reference']], NO_PD, 'External noise')
 
-    # scores
-    M = clamp((LV - DETECT_DB) / (FULL_DB - DETECT_DB) * 100)
-    T = clamp(df['Trend (dB/30d)'] / TREND_FULL * 100)
-    R = clamp(np.log10(np.maximum(df['Pulse Rate (pps)'], 1)) / 3 * 100)
-    S = np.array([SEVERITY[c][d] for c, d in zip(df['Asset Class'], df['Defect'])])
-    base = 0.55 * M + 0.25 * T + 0.20 * R
-    risk = base * (0.35 + 0.65 * S / 10)
-    df['Magnitude Score'], df['Trend Score'], df['Rate Score'] = M, T, R
-
     # confirmations
     ac = _latest_test(df, acoustic, ['Detected', 'Amplitude (mV)'])
     df['Acoustic'] = ac['Detected'].map(lambda v: None if pd.isna(v) else ('Yes' if str(v).strip().lower() in ('yes', 'y', 'true', '1') else 'No'))
@@ -358,26 +352,44 @@ def assess(online, sensors, model, dga=None, acoustic=None, sf6=None):
         df['H2 (ppm)'] = df['CH4 (ppm)'] = df['C2H2 (ppm)'] = np.nan
 
     is_pd = ~df['Defect'].isin([NO_PD, 'External noise'])
-    acoustic_yes = (df['Acoustic'] == 'Yes') & is_pd
-    sf6_lvl = np.where(df['SF6 By-products (ppmv)'] >= SF6_HIGH, 2, np.where(df['SF6 By-products (ppmv)'] >= SF6_INDICATIVE, 1, 0)) * is_pd
-    h2, c2 = df['H2 (ppm)'].fillna(0), df['C2H2 (ppm)'].fillna(0)
-    dga_lvl = np.where((h2 > H2_LIMITS[1]) | (c2 > C2H2_LIMITS[1]), 2, np.where((h2 > H2_LIMITS[0]) | (c2 > C2H2_LIMITS[0]), 1, 0))
-    dga_lvl = dga_lvl * (is_pd & df['Asset Class'].isin(['Transformer', 'Reactor']))
-    boost = 15 * acoustic_yes + 10 * sf6_lvl + 10 * dga_lvl
-    n_conf = acoustic_yes.astype(int) + (sf6_lvl > 0) + (dga_lvl > 0)
-    df['Confirmations'] = n_conf
-    risk = risk + boost
-
-    # persistence: share of the last 14 days with a PD pattern on this sensor (past data only)
+    # persistence: number of the last 14 days with a PD pattern on this sensor (past data only)
     df['_pd'] = is_pd.astype(float)
-    df['PD Days (14d)'] = 0
+    df['PD Days (14d)'] = 0.0
     for sid, g in df.groupby('Sensor ID'):
         s = pd.Series(g['_pd'].to_numpy(), index=pd.DatetimeIndex(g['Timestamp']))
         df.loc[g.index, 'PD Days (14d)'] = s.rolling(f"{PERSIST_WINDOW_D}D").sum().to_numpy()
+    df = score(df)
+    return df.drop(columns=['_day', '_pd'])
+
+
+def score(df):
+    """The PD risk rules. Needs: Asset Class, dB Above Baseline, Level (dB, 7d median), Trend (dB/30d),
+    Pulse Rate (pps), Defect, Confidence (%), Acoustic, SF6 By-products (ppmv), H2 (ppm), C2H2 (ppm), PD Days (14d).
+    Used by the substation analysis, the historical study and the single-reading pages alike."""
+    df = df.copy()
+    LV = df['Level (dB, 7d median)']
+    is_pd = ~df['Defect'].isin([NO_PD, 'External noise'])
+    M = clamp((LV - DETECT_DB) / (FULL_DB - DETECT_DB) * 100)
+    T = clamp(df['Trend (dB/30d)'] / TREND_FULL * 100)
+    R = clamp(np.log10(np.maximum(df['Pulse Rate (pps)'], 1)) / 3 * 100)
+    S = np.array([SEVERITY[c][d] for c, d in zip(df['Asset Class'], df['Defect'])])
+    base = 0.55 * M + 0.25 * T + 0.20 * R
+    risk = base * (0.35 + 0.65 * S / 10)
+    df['Magnitude Score'], df['Trend Score'], df['Rate Score'] = M, T, R
+
+    sf6v = pd.to_numeric(df['SF6 By-products (ppmv)'], errors='coerce')
+    acoustic_yes = (df['Acoustic'] == 'Yes') & is_pd
+    sf6_lvl = np.where(sf6v >= SF6_HIGH, 2, np.where(sf6v >= SF6_INDICATIVE, 1, 0)) * is_pd
+    h2 = pd.to_numeric(df['H2 (ppm)'], errors='coerce').fillna(0)
+    c2 = pd.to_numeric(df['C2H2 (ppm)'], errors='coerce').fillna(0)
+    dga_lvl = np.where((h2 > H2_LIMITS[1]) | (c2 > C2H2_LIMITS[1]), 2, np.where((h2 > H2_LIMITS[0]) | (c2 > C2H2_LIMITS[0]), 1, 0))
+    dga_lvl = dga_lvl * (is_pd & df['Asset Class'].isin(['Transformer', 'Reactor']))
+    risk = risk + 15 * acoustic_yes + 10 * sf6_lvl + 10 * dga_lvl
+    n_conf = acoustic_yes.astype(int) + (sf6_lvl > 0) + (dga_lvl > 0)
+    df['Confirmations'] = n_conf
+
     persistent = df['PD Days (14d)'] >= PERSIST_MIN_DAYS
     df['Isolated'] = is_pd & ~persistent
-
-    # safety rules
     risk = np.where(df['Isolated'], np.minimum(risk, 30), risk)
     risk = np.where(is_pd & persistent & (S >= 8) & (LV >= 6), np.maximum(risk, 40), risk)
     crit = (S >= 8) & (M >= 40)
@@ -389,22 +401,72 @@ def assess(online, sensors, model, dga=None, acoustic=None, sf6=None):
     df['PD Risk (%)'] = np.round(clamp(risk), 1)
     df['Status'] = df['PD Risk (%)'].map(status_of)
 
-    # time to critical level
     slope = df['Trend (dB/30d)']
     ttc = np.where((slope > TREND_MIN) & (LV < CRITICAL_DB) & is_pd,
                    (CRITICAL_DB - LV) / slope.where(slope > 0, 1) * 30, np.nan)
     ttc = np.where(is_pd & (LV >= CRITICAL_DB), 0, ttc)
     df['Days to Critical'] = np.round(ttc)
 
-    # FMEA
     df['S'] = S
     df['O'] = np.maximum(1, np.ceil(df['PD Risk (%)'] / 10)).astype(int)
     df['D'] = DETECTION_ONLINE
     df['RPN'] = df['S'] * df['O'] * df['D']
     df['RPN Level'] = df['RPN'].map(rpn_level)
     df['Low Confidence'] = is_pd & (df['Confidence (%)'] < LOW_CONFIDENCE * 100)
-    df['Action'] = [ACTIONS[s].get(d, ACTIONS[s]['default']) for s, d in zip(df['Status'], df['Defect'])]
-    return df.drop(columns=['_day', '_pd'])
+    df['Action'] = [ACTIONS[st].get(d, ACTIONS[st]['default']) for st, d in zip(df['Status'], df['Defect'])]
+    return df
+
+
+PATTERN_SHAPES = {
+    'Two clusters on the rising part of both half-cycles, similar size': 'Void',
+    'Two clusters, one much larger than the other': 'Surface',
+    'One narrow cluster at the negative voltage peak': 'Corona',
+    'Two narrow clusters with almost constant amplitude': 'Floating',
+    'Pulses spread over the whole cycle, random amplitudes': 'Free particle',
+    'Flat or fixed lines unrelated to the voltage': 'External noise',
+}
+
+
+def example_profile(kind, pulse_rate, seed=5):
+    """Representative PRPD profile for a pattern shape picked on screen (60-second window)."""
+    rng = np.random.default_rng(seed)
+    return generate_pattern(kind, rng, total=int(max(pulse_rate, 1) * 60), background=0.05)
+
+
+def assess_single(model, asset_type, peak, baseline, unit, pulse_rate, counts, mags,
+                  prev_peak=None, days_since_prev=30, pd_days_14=14, noise_ref_db=None,
+                  acoustic=None, sf6_byproducts=None, h2=None, c2h2=None, asset_id='', location=''):
+    """One reading entered by hand (or one PRPD export row) assessed with the same rules as the station analysis."""
+    cls = asset_class(asset_type)
+    db = float(db_above([peak], [baseline], [unit])[0])
+    trend = 0.0
+    if prev_peak is not None and days_since_prev and days_since_prev > 0:
+        prev_db = float(db_above([prev_peak], [baseline], [unit])[0])
+        trend = (db - prev_db) / days_since_prev * 30
+    X = features_from_profile(np.asarray(counts, float)[None], np.asarray(mags, float)[None])
+    P = model.predict_proba(X)[0]
+    k = int(P.argmax())
+    defect, conf = model.classes_[k], P[k] * 100
+    if db < DETECT_DB:
+        defect = NO_PD
+    noise_ref_db = -99.0 if noise_ref_db is None else noise_ref_db
+    suppressed = False
+    if noise_ref_db >= NOISE_REF_DB and defect in ('Corona', 'External noise', 'Free particle'):
+        suppressed = defect != NO_PD
+        defect = 'External noise' if defect != NO_PD else defect
+    row = {'Asset ID': asset_id, 'Location': location, 'Asset Type': asset_type, 'Asset Class': cls,
+           'Peak': peak, 'Baseline': baseline, 'Unit': unit,
+           'dB Above Baseline': db, 'Level (dB, 7d median)': db, 'Trend (dB/30d)': trend,
+           'Pulse Rate (pps)': float(pulse_rate), 'Defect': defect, 'Confidence (%)': conf,
+           'Noise Ref (dB)': noise_ref_db, 'Noise Reference': False, 'Noise Suppressed': suppressed,
+           'Acoustic': acoustic, 'SF6 By-products (ppmv)': np.nan if sf6_byproducts is None else sf6_byproducts,
+           'H2 (ppm)': np.nan if h2 is None else h2, 'C2H2 (ppm)': np.nan if c2h2 is None else c2h2,
+           'PD Days (14d)': float(pd_days_14), 'Single': True, 'Sensor ID': asset_id}
+    for i in range(N_BINS):
+        row[H_COLS[i]] = counts[i]
+        row[M_COLS[i]] = mags[i]
+    out = score(pd.DataFrame([row])).iloc[0]
+    return out, dict(zip(model.classes_, P))
 
 
 def reasons(row):
@@ -420,13 +482,18 @@ def reasons(row):
             r.append('The pattern has no fixed relation to the voltage phase that matches a PD defect: classified as external interference.')
         return r
     r.append(f"{DEFECT_TEXT[d]} (pattern confidence {row['Confidence (%)']:.0f}%).")
-    r.append(f"Level {row['Level (dB, 7d median)']:.1f} dB above the sensor background (7-day median; today {row['dB Above Baseline']:.1f} dB); {row['Pulse Rate (pps)']:.0f} pulses per second.")
+    single = bool(row.get('Single', False))
+    if single:
+        r.append(f"Level {row['dB Above Baseline']:.1f} dB above the sensor background; {row['Pulse Rate (pps)']:.0f} pulses per second.")
+    else:
+        r.append(f"Level {row['Level (dB, 7d median)']:.1f} dB above the sensor background (7-day median; today {row['dB Above Baseline']:.1f} dB); {row['Pulse Rate (pps)']:.0f} pulses per second.")
+    span = 'since the previous reading' if single else f"over the last {TREND_WINDOW_D} days"
     if row['Trend (dB/30d)'] > TREND_MIN:
-        r.append(f"Rising by {row['Trend (dB/30d)']:.1f} dB per month over the last {TREND_WINDOW_D} days.")
+        r.append(f"Rising by {row['Trend (dB/30d)']:.1f} dB per month {span}.")
     elif row['Trend (dB/30d)'] < -TREND_MIN:
         r.append(f"Falling by {-row['Trend (dB/30d)']:.1f} dB per month.")
     else:
-        r.append('Stable over the last 60 days.')
+        r.append('Stable since the previous reading.' if single else f'Stable over the last {TREND_WINDOW_D} days.')
     if not pd.isna(row.get('Days to Critical')):
         if row['Days to Critical'] == 0:
             r.append(f"Already at or above the critical level ({CRITICAL_DB:.0f} dB).")
@@ -515,7 +582,7 @@ def historical_study(assessed, events=None, alert_threshold=70.0, lookback_days=
 # ---------------------------------------------------------------- demo data
 def demo_register():
     """Sample 400/220 kV GIS substation: breaker-and-a-half, 4 diameters, 3 transformers,
-    2 bus reactors, 2 line reactors and 3 cable sealing ends."""
+    2 bus reactors, 2 line reactors, 3 cable sealing ends and 2 HV motors."""
     rows = []
     for q in range(1, 5):
         for cb in range(1, 4):
@@ -530,6 +597,8 @@ def demo_register():
         rows.append([f"UHF-{r}", r, 'Shunt reactor 400 kV', f"Reactor {r}, drain-valve probe", 'UHF', 'dBm', -66.0, 'No'])
     for c in (1, 2, 3):
         rows.append([f"HFCT-C{c}", f"CABLE-{c}", 'Cable 220 kV', f"220 kV cable sealing end, transformer T{c}", 'HFCT', 'pC', 20.0, 'No'])
+    for mtr in (1, 2):
+        rows.append([f"CC-M{mtr}", f"MOTOR-{mtr}", 'HV motor 13.8 kV', f"Motor M{mtr} stator, coupling capacitors", 'Coupling capacitor', 'pC', 50.0, 'No'])
     return pd.DataFrame(rows, columns=['Sensor ID', 'Asset ID', 'Asset Type', 'Location', 'Method', 'Unit', 'Baseline', 'Noise Reference'])
 
 
@@ -539,6 +608,7 @@ def demo_data(seed=7, start='2025-01-01', end='2026-08-31'):
        T2      internal discharge in the HV winding -> transformer trip
        CABLE-3 surface discharge on the sealing end -> termination failure
        RB1     stable floating electrode (watch, no event)
+       MOTOR-2 stable slot / surface discharge in the stator (watch)
        Q1-CB3  small corona from mid-2026
        Summer interference picked up by BUS1-S1, Q4-CB1 and the noise reference -> suppressed"""
     rng = np.random.default_rng(seed)
@@ -576,6 +646,8 @@ def demo_data(seed=7, start='2025-01-01', end='2026-08-31'):
                     kind, lvl, pps = 'Surface', v + rng.normal(0, 1.0), 10 + v * 10 + rng.uniform(0, 15)
             elif sid == 'UHF-RB1':
                 kind, lvl, pps = 'Floating', 10 + rng.normal(0, 0.8), 100 + rng.uniform(0, 20)
+            elif sid == 'CC-M2' and day >= D('2025-04-01'):
+                kind, lvl, pps = 'Surface', 8 + rng.normal(0, 0.8), 60 + rng.uniform(0, 20)
             elif sid == 'UHF-Q1-CB3' and day >= D('2026-05-01'):
                 kind, lvl, pps = 'Corona', 5 + rng.normal(0, 0.7), 40 + rng.uniform(0, 20)
             if day in noise_days and sid in ('UHF-BUS1-S1', 'UHF-Q4-CB1', 'UHF-NOISE'):
