@@ -104,7 +104,7 @@ def _wrap_gauss(centre, width):
     return np.exp(-0.5 * (d / width) ** 2)
 
 
-def generate_pattern(kind, rng, total=None, background=None):
+def generate_pattern(kind, rng, total=None, background=None, expected=False):
     """Synthetic PRPD phase profile for one acquisition window.
     Returns (counts[36], magnitude[36] in 0-1). Shapes follow the textbook PRPD signatures."""
     total = total if total is not None else int(rng.uniform(300, 20000))
@@ -148,8 +148,10 @@ def generate_pattern(kind, rng, total=None, background=None):
     p = np.clip(p, 1e-6, None)
     bg = background if background is not None else rng.uniform(0, 0.12)
     p = (1 - bg) * p / p.sum() + bg / N_BINS
-    counts = rng.poisson(p * total).astype(float)
     mag = np.clip(mag, 0.02, 1.0)
+    if expected:                       # deterministic profile (pattern picked on screen)
+        return p, mag
+    counts = rng.poisson(p * total).astype(float)
     mag = np.where(counts > 0, mag, 0.0)
     if mag.max() > 0:
         mag = mag / mag.max()
@@ -427,10 +429,20 @@ PATTERN_SHAPES = {
 }
 
 
+def example_shape(kind, seed=5):
+    """Phase probabilities and magnitudes of the representative pattern of each shape."""
+    return generate_pattern(kind, np.random.default_rng(seed), total=1, background=0.05, expected=True)
+
+
 def example_profile(kind, pulse_rate, seed=5):
-    """Representative PRPD profile for a pattern shape picked on screen (60-second window)."""
-    rng = np.random.default_rng(seed)
-    return generate_pattern(kind, rng, total=int(max(pulse_rate, 1) * 60), background=0.05)
+    """Representative PRPD profile for a pattern shape picked on screen (60-second window).
+    Deterministic: expected pulse counts, no random sampling."""
+    p, mag = example_shape(kind, seed)
+    counts = np.round(p * int(max(pulse_rate, 1) * 60))
+    mag = np.where(counts > 0, mag, 0.0)
+    if mag.max() > 0:
+        mag = mag / mag.max()
+    return counts, np.round(mag, 3)
 
 
 def assess_single(model, asset_type, peak, baseline, unit, pulse_rate, counts, mags,
