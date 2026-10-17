@@ -691,3 +691,24 @@ def demo_data(seed=7, start='2025-01-01', end='2026-08-31'):
         ['CABLE-3', ev_cable.date().isoformat(), 'Cable sealing end failure (phase C)'],
     ], columns=['Asset ID', 'Date', 'Event'])
     return {'sensors': reg, 'online': online, 'dga': dga, 'acoustic': acoustic, 'sf6': sf6, 'events': events}
+
+
+def contributions(row):
+    """How many risk points each factor adds for one assessed row (sums to the final PD risk)."""
+    d = row['Defect']
+    is_pd = d not in (NO_PD, 'External noise')
+    f = 0.35 + 0.65 * row['S'] / 10
+    out = {'Level above background': 0.55 * row['Magnitude Score'] * f,
+           'Trend': 0.25 * row['Trend Score'] * f,
+           'Pulse rate': 0.20 * row['Rate Score'] * f}
+    sf6v = row.get('SF6 By-products (ppmv)')
+    sf6v = None if sf6v is None or pd.isna(sf6v) else float(sf6v)
+    h2 = row.get('H2 (ppm)'); c2 = row.get('C2H2 (ppm)')
+    h2 = 0 if h2 is None or pd.isna(h2) else float(h2)
+    c2 = 0 if c2 is None or pd.isna(c2) else float(c2)
+    out['Acoustic confirmation'] = 15.0 if (is_pd and row.get('Acoustic') == 'Yes') else 0.0
+    out['SF6 confirmation'] = (20.0 if sf6v >= SF6_HIGH else 10.0 if sf6v >= SF6_INDICATIVE else 0.0) if (is_pd and sf6v is not None) else 0.0
+    dl = 2 if (h2 > H2_LIMITS[1] or c2 > C2H2_LIMITS[1]) else 1 if (h2 > H2_LIMITS[0] or c2 > C2H2_LIMITS[0]) else 0
+    out['DGA confirmation'] = 10.0 * dl if (is_pd and row['Asset Class'] in ('Transformer', 'Reactor')) else 0.0
+    out['Safety rules'] = float(row['PD Risk (%)']) - sum(out.values())
+    return {k: round(v, 1) for k, v in out.items()}
