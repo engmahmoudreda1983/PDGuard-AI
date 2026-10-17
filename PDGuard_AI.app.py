@@ -21,7 +21,8 @@ CLASS_TITLE = {'Transformer': 'Transformers', 'GIS': 'GIS', 'Reactor': 'Reactors
 
 st.markdown("""
 <style>
-.pg-header {background:#0b2e59;padding:18px 22px;border-radius:10px;margin-bottom:18px;}
+.pg-header {background:#0b2e59;padding:16px 22px;border-radius:10px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:16px;}
+.pg-header img {height:64px;background:#fff;border-radius:8px;padding:4px 8px;}
 .pg-header h1 {color:#fff;margin:0;font-size:1.9rem;}
 .pg-header p {color:#9fd0ff;margin:4px 0 0 0;font-size:1rem;}
 .pg-banner {border:2px solid;border-radius:8px;padding:10px 14px;text-align:center;margin:6px 0 12px 0;}
@@ -90,10 +91,29 @@ with col_r:
         st.session_state['logged_in'] = False
         st.rerun()
 
-st.markdown("""
+@st.cache_data
+def logo_b64():
+    try:
+        import base64, io
+        from PIL import Image
+        im = Image.open('logo.png')
+        im.thumbnail((360, 200))
+        buf = io.BytesIO()
+        im.save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None
+
+
+_logo = logo_b64()
+_logo_html = f"<img src='data:image/png;base64,{_logo}' alt='PowerGuard AI'>" if _logo else ""
+st.markdown(f"""
 <div class='pg-header'>
-  <h1>⚡ PDGuard AI: Partial Discharge Risk Monitor</h1>
-  <p>GIS, transformers, reactors, cables and motors: PD pattern, trend and confirmation, fused into one risk</p>
+  <div>
+    <h1>⚡ PDGuard AI: Partial Discharge Risk Monitor</h1>
+    <p>GIS, transformers, reactors, cables and motors: PD pattern, trend and confirmation, fused into one risk</p>
+  </div>
+  {_logo_html}
 </div>""", unsafe_allow_html=True)
 
 
@@ -183,6 +203,24 @@ def contrib_plot(row, height=300):
     return fig
 
 
+def rpn_plot(row, height=230):
+    rpn = int(row['RPN'])
+    col = GREEN if rpn < 40 else AMBER if rpn < 100 else RED
+    fig = go.Figure()
+    for x0, x1, c, t in [(0, 40, 'rgba(26,158,92,.18)', 'Low'), (40, 100, 'rgba(217,154,0,.18)', 'Medium'),
+                         (100, 200, 'rgba(214,58,58,.18)', 'High')]:
+        fig.add_shape(type='rect', x0=x0, x1=x1, y0=-0.5, y1=0.5, fillcolor=c, line_width=0, layer='below')
+        fig.add_annotation(x=(x0 + x1) / 2, y=0.62, text=t, showarrow=False, font=dict(size=11, color='#555'))
+    fig.add_bar(x=[rpn], y=[0], orientation='h', width=0.45, marker_color=col,
+                text=[f"RPN {rpn} = S {int(row['S'])} × O {int(row['O'])} × D {int(row['D'])}"],
+                textposition='inside' if rpn > 110 else 'outside', insidetextanchor='middle', cliponaxis=False,
+                hoverinfo='skip', textfont=dict(color='white' if rpn > 110 else '#222'))
+    fig.update_layout(title='Risk Priority Number (max 200)', height=height, showlegend=False,
+                      xaxis=dict(range=[0, 200], tickvals=[0, 40, 100, 200], title='RPN'),
+                      yaxis=dict(visible=False, range=[-0.6, 0.8]), margin=dict(l=10, r=10, t=45, b=40))
+    return fig
+
+
 def show_result(row, probs, counts, mags, k):
     color = STATUS_COLOR[row['Status']]
     banner(STATUS_LABEL[row['Status']], f"{row['Asset ID']}  ·  {pc.DEFECT_TEXT[row['Defect']]}", color)
@@ -206,15 +244,17 @@ def show_result(row, probs, counts, mags, k):
         st.markdown(f"- {t}")
     st.warning(f"**Action:** {row['Action']}")
     st.markdown("#### 🧮 FMEA")
-    f1, f2 = st.columns([2, 1])
+    f1, f2 = st.columns([1.2, 1])
     f1.dataframe(pd.DataFrame([{'Failure Mode': f"{row['Defect']} ({row['Asset Class']})", 'S': int(row['S']),
                                 'O': int(row['O']), 'D': int(row['D']), 'RPN': int(row['RPN']),
                                 'RPN Level': row['RPN Level']}]), hide_index=True, width=STRETCH)
     f1.caption("RPN = Severity × Occurrence × Detection. S = severity of this defect at this equipment; "
                "O = PD risk ÷ 10; D = 2 for online monitoring. Low < 40, Medium 40-99, High ≥ 100.")
     if not pd.isna(row['Days to Critical']):
-        f2.metric("Estimated days to critical level", "Already critical" if row['Days to Critical'] == 0
+        f1.metric("Estimated days to critical level", "Already critical" if row['Days to Critical'] == 0
                   else f"{row['Days to Critical']:.0f} days")
+    with f2:
+        st.plotly_chart(rpn_plot(row), width=STRETCH, key=f"{k}_rpn")
 
 
 REC_KEYS = ['Asset ID', 'Asset Type', 'Asset Class', 'Location', 'Sensor ID', 'Defect', 'dB Above Baseline',
