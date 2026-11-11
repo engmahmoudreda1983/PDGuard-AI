@@ -429,6 +429,44 @@ def equipment_page(cls):
 # ==========================================
 # --- 5. Tabs ---
 # ==========================================
+# ---- about this module: shown open at the top of the overview page (it can be closed)
+ABOUT = {
+ "lead": "Watches partial discharge in transformers, GIS, reactors, cables and motors, tells the type of discharge from its pattern, and ranks the assets by how fast the discharge is growing.",
+ "in": [
+  "PD sensor readings per asset (level and trend)",
+  "PRPD pattern: the shape seen on the monitoring screen, or the PRPD export (CSV)",
+  "Oil gas results for transformers and reactors (optional)"
+ ],
+ "out": [
+  "Discharge type (internal, surface, corona, floating part)",
+  "Trend and rate of rise against the baseline",
+  "Risk ranking and recommended action",
+  "Combined PDF report"
+ ],
+ "start": [
+  "Open the page of the equipment: Transformers, GIS, Reactors, Cables or Motors",
+  "Enter the reading and the PRPD pattern, press Analyze PD",
+  "Read the ranking in Substation Overview"
+ ],
+ "pages": [
+  "Substation Overview: every asset and its risk",
+  "Transformers, GIS, Reactors, Cables, Motors: one asset each",
+  "Combined Report, Historical Study"
+ ],
+ "std": "IEC 60270 (PD measurement) · IEC 60480 (SF6) · IEEE C57.104 (gases) · ISO 55000 / IEC 31010 (risk)"
+}
+
+
+def about_module():
+    with st.expander('ℹ️ About this module: what it does and how to use it', expanded=True):
+        st.markdown(ABOUT['lead'])
+        for (t1, k1), (t2, k2) in ((('What you upload', 'in'), ('What you get', 'out')), (('How to start', 'start'), ('Pages', 'pages'))):
+            for col, title, key in zip(st.columns(2), (t1, t2), (k1, k2)):
+                with col.container(border=True):
+                    st.markdown(f'**{title}**\n\n' + '\n'.join((f'{i + 1}. ' if key == 'start' else '- ') + x for i, x in enumerate(ABOUT[key])))
+        st.caption('Standards: ' + ABOUT['std'])
+
+
 tabs = st.tabs(["🏭 Substation Overview", "⚡ Transformers", "🔌 GIS", "🌀 Reactors", "〰️ Cables", "⚙️ Motors",
                 "📄 Combined Report", "📈 Historical Study"])
 
@@ -464,6 +502,7 @@ def read_uploads(prefix):
 
 # ---------------- Overview
 with tabs[0]:
+    about_module()
     st.radio("Show", [SRC_PAGES, SRC_DEMO], horizontal=True, key='ov_src')
     R0 = current_records()
     if st.session_state['ov_src'] == SRC_PAGES:
